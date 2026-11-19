@@ -147,13 +147,18 @@ impl PowerUp {
                 ],
                 power_up: None,
             }),
-            PowerUp::ReDeal => Ok(Hand {
-                playing_cards: [
-                    deck.draw().expect("deck shouldn't be empty"),
-                    deck.draw().expect("deck shouldn't be empty"),
-                ],
-                power_up: None,
-            }),
+            PowerUp::ReDeal => {
+                if deck.cards.len() < 2 {
+                    return Err("not enough cards to re-deal");
+                }
+                Ok(Hand {
+                    playing_cards: [
+                        deck.draw().ok_or("not enough cards to re-deal")?,
+                        deck.draw().ok_or("not enough cards to re-deal")?,
+                    ],
+                    power_up: None,
+                })
+            }
         }
     }
 }
@@ -244,6 +249,8 @@ pub struct Player {
     pub name: String,
     pub chips: usize,
     pub hand: Option<Hand>,
+    pub current_bet: usize,
+    pub last_action: Option<Action>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -251,15 +258,15 @@ pub enum Phase {
     NotStarted,
     PreFlop,
     Flop,
-    Turn,
-    River,
     Showdown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct Table {
     pub pot: usize,
-    pub community_cards: Option<[PlayingCard; 5]>,
+    pub community_cards: Option<Vec<PlayingCard>>,
+    /// Power-ups played by each player in the current or most recent hand.
+    pub played_power_ups: [Option<PowerUp>; 2],
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -267,6 +274,7 @@ pub struct GameState {
     pub players: [Player; 2],
     pub round: usize,
     pub phase: Phase,
+    pub player_1_acts_first: bool,
     pub card_deck: Deck<PlayingCard>,
     pub power_up_deck: Deck<PowerUp>,
     pub table: Table,
@@ -280,20 +288,26 @@ impl GameState {
                     name: player_1_name.to_string(),
                     chips: 15,
                     hand: None,
+                    current_bet: 0,
+                    last_action: None,
                 },
                 Player {
                     name: player_2_name.to_string(),
                     chips: 15,
                     hand: None,
+                    current_bet: 0,
+                    last_action: None,
                 },
             ],
             round: 0,
             phase: Phase::NotStarted,
+            player_1_acts_first: true,
             card_deck: Deck::new_52_card_deck(),
             power_up_deck: Deck::new_power_up_deck(5, 5, 2, 2, 6),
             table: Table {
                 pot: 0,
                 community_cards: None,
+                played_power_ups: [None; 2],
             },
         }
     }
@@ -302,6 +316,8 @@ impl GameState {
         // increments
         self.round += 1;
         self.phase = Phase::PreFlop;
+        self.player_1_acts_first = !self.player_1_acts_first;
+        self.table.played_power_ups = [None; 2];
 
         // shuffle decks
         self.card_deck.shuffle();
@@ -325,21 +341,126 @@ impl GameState {
         Ok(())
     }
 
-    pub fn clean_up(&mut self) {
+    pub fn clean_up(&mut self, winner_idx: usize) {
         self.phase = Phase::NotStarted;
         self.card_deck = Deck::new_52_card_deck();
         self.power_up_deck = Deck::new_power_up_deck(5, 5, 2, 2, 6);
+        self.players[winner_idx].chips += self.table.pot;
         self.table = Table {
             pot: 0,
             community_cards: None,
+            played_power_ups: self.table.played_power_ups,
         };
         for player in &mut self.players {
             player.hand = None;
         }
     }
 
-    pub fn step_turn(&mut self) {
-        unimplemented!();
+    pub fn step_turn(
+        &mut self,
+        player_id: usize,
+        action: Action,
+        power_up_use: Option<PowerUpUse>,
+    ) -> Result<TurnOutcome, &'static str> {
+        fn clean_up_players_ready_for_next_phase(state: &mut GameState) {
+            for player in &mut state.players {
+                player.current_bet = 0;
+                player.last_action = None;
+            }
+        }
+
+        if !(player_id == 0 || player_id == 1) {
+            return Err("player id does not exist");
+        }
+        if !matches!(self.phase, Phase::PreFlop | Phase::Flop) {
+            return Err("can't take a turn outside a betting phase");
+        }
+        if power_up_use.is_some() && self.phase != Phase::Flop {
+            return Err("power-ups can only be used post-flop");
+        }
+        if power_up_use.is_some() && action == Action::Fold {
+            return Err("power-ups cannot be used when folding");
+        }
+
+        let (first, second) = self.players.split_at_mut(1);
+        let (this_player, other_player) = if player_id == 1 {
+            (&mut second[0], &mut first[0])
+        } else {
+            (&mut first[0], &mut second[0])
+        };
+
+        if let Action::Bet(bet_size) = action {
+            if !(1..=2).contains(&bet_size) {
+                return Err("bet must be 1 or 2 chips");
+            }
+            if other_player.current_bet > 0 {
+                return Err("raising is not allowed");
+            }
+        }
+        if action == Action::CheckOrCall
+            && other_player.current_bet == 0
+            && other_player.last_action.is_some()
+            && other_player.last_action != Some(Action::CheckOrCall)
+        {
+            return Err("impossible situation on check/call, based on other player");
+        }
+
+        if let Some(power_up_use) = power_up_use {
+            let hand = this_player.hand.ok_or("player has no hand")?;
+            let power_up = hand.power_up.ok_or("player has no power-up")?;
+            match (power_up, power_up_use.card_chosen_idx) {
+                (PowerUp::ReDeal, None) => {}
+                (PowerUp::ReDeal, Some(_)) => return Err("re-deal does not need a card choice"),
+                (_, Some(0 | 1)) => {}
+                (_, Some(_)) => return Err("hole card choice does not exist"),
+                (_, None) => return Err("choose a hole card for the power-up"),
+            }
+            this_player.hand = Some(power_up.use_power(
+                &mut self.card_deck,
+                hand,
+                power_up_use.card_chosen_idx,
+            )?);
+            self.table.played_power_ups[player_id] = Some(power_up);
+        }
+
+        this_player.last_action = Some(action);
+
+        match action {
+            Action::Fold => {
+                other_player.chips += other_player.current_bet;
+                let other_player_idx: usize = if player_id == 1 { 0 } else { 1 };
+
+                clean_up_players_ready_for_next_phase(self);
+                self.clean_up(other_player_idx);
+                Ok(TurnOutcome::NextHand)
+            }
+            Action::CheckOrCall => {
+                if other_player.current_bet > 0 {
+                    this_player.chips -= other_player.current_bet;
+                    this_player.current_bet = other_player.current_bet;
+
+                    self.table.pot += this_player.current_bet + other_player.current_bet;
+
+                    clean_up_players_ready_for_next_phase(self);
+                    Ok(TurnOutcome::NextPhase)
+                } else if other_player.last_action == Some(Action::CheckOrCall) {
+                    self.table.pot += this_player.current_bet + other_player.current_bet;
+
+                    clean_up_players_ready_for_next_phase(self);
+                    Ok(TurnOutcome::NextPhase)
+                } else if other_player.last_action.is_none() {
+                    Ok(TurnOutcome::NextPlayer)
+                } else {
+                    Err("impossible situation on check/call, based on other player")
+                }
+            }
+            Action::Bet(bet_size) => {
+                this_player.chips -= bet_size as usize;
+                this_player.current_bet = bet_size as usize;
+
+                Ok(TurnOutcome::NextPlayer)
+            }
+        }
     }
 }
 
@@ -348,6 +469,19 @@ pub enum Action {
     Fold,
     CheckOrCall,
     Bet(u8), // only 1 or 2
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PowerUpUse {
+    /// The chosen hole-card index, or `None` for ReDeal.
+    pub card_chosen_idx: Option<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnOutcome {
+    NextPlayer,
+    NextPhase,
+    NextHand,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

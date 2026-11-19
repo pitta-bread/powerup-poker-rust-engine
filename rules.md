@@ -7,11 +7,14 @@ low in an A-2-3-4-5 straight or straight flush, which is five-high.
 4. The game is played with 2 players.
 5. Each player is dealt 2 hole cards face down, plus one power-up card face down.
 6. The game consists of 2 rounds of betting: pre-flop and post-flop.
-7. Each player can bet a maximum of 2 chips per round (check, bet one, or bet two).
+7. Each player can contribute at most 2 chips per round. If no bet has been made,
+a player may check or bet 1 or 2 chips. Once a player bets, the other player may
+only call or fold; raising is not allowed. The round ends when both players check
+or a bet is called. Folding ends the hand.
 8. Players can use their power-up card only post-flop, and it must be used at the same
 time as confirming their bet, before they know the result of it.
 If the hand ends before the flop, power-up use remains private, otherwise it is revealed
-to all players what was used.
+to all players what was used after post-flop betting ends.
 9. The 5 possible power-ups are as follows:
     1. Increase Rank. Increase the value of a card by +1. King goes to Ace. (5)
     2. Decrease Rank. Decrease the value of a card by -1. Ace goes to King. (5)
