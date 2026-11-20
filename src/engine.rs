@@ -269,12 +269,19 @@ pub struct Table {
     pub played_power_ups: [Option<PowerUp>; 2],
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShowdownResult {
+    Winner(usize),
+    SplitPot,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct GameState {
     pub players: [Player; 2],
     pub round: usize,
     pub phase: Phase,
-    pub player_1_acts_first: bool,
+    pub acts_first_this_hand: usize, // 0 or 1
+    pub active_player: usize,        // 0 or 1
     pub card_deck: Deck<PlayingCard>,
     pub power_up_deck: Deck<PowerUp>,
     pub table: Table,
@@ -301,7 +308,8 @@ impl GameState {
             ],
             round: 0,
             phase: Phase::NotStarted,
-            player_1_acts_first: true,
+            acts_first_this_hand: 1,
+            active_player: 0,
             card_deck: Deck::new_52_card_deck(),
             power_up_deck: Deck::new_power_up_deck(5, 5, 2, 2, 6),
             table: Table {
@@ -316,8 +324,13 @@ impl GameState {
         // increments
         self.round += 1;
         self.phase = Phase::PreFlop;
-        self.player_1_acts_first = !self.player_1_acts_first;
-        self.table.played_power_ups = [None; 2];
+        self.acts_first_this_hand = 1 - self.acts_first_this_hand;
+        self.active_player = self.acts_first_this_hand;
+        self.table = Table {
+            pot: 0,
+            community_cards: None,
+            played_power_ups: [None; 2],
+        };
 
         // shuffle decks
         self.card_deck.shuffle();
@@ -341,16 +354,22 @@ impl GameState {
         Ok(())
     }
 
-    pub fn clean_up(&mut self, winner_idx: usize) {
+    pub fn clean_up(&mut self, result: ShowdownResult) {
         self.phase = Phase::NotStarted;
         self.card_deck = Deck::new_52_card_deck();
         self.power_up_deck = Deck::new_power_up_deck(5, 5, 2, 2, 6);
-        self.players[winner_idx].chips += self.table.pot;
-        self.table = Table {
-            pot: 0,
-            community_cards: None,
-            played_power_ups: self.table.played_power_ups,
-        };
+
+        match result {
+            ShowdownResult::SplitPot => {
+                self.players[0].chips += self.table.pot / 2;
+                self.players[1].chips += self.table.pot / 2;
+            }
+            ShowdownResult::Winner(winner_idx) => {
+                self.players[winner_idx].chips += self.table.pot;
+            }
+        }
+        self.table.pot = 0;
+
         for player in &mut self.players {
             player.hand = None;
         }
@@ -363,14 +382,19 @@ impl GameState {
         power_up_use: Option<PowerUpUse>,
     ) -> Result<TurnOutcome, &'static str> {
         fn clean_up_players_ready_for_next_phase(state: &mut GameState) {
+            // clear betting
             for player in &mut state.players {
                 player.current_bet = 0;
                 player.last_action = None;
             }
         }
 
+        // VALIDATIONS
         if !(player_id == 0 || player_id == 1) {
             return Err("player id does not exist");
+        }
+        if player_id != self.active_player {
+            return Err("not this player's turn!");
         }
         if !matches!(self.phase, Phase::PreFlop | Phase::Flop) {
             return Err("can't take a turn outside a betting phase");
@@ -393,6 +417,9 @@ impl GameState {
             if !(1..=2).contains(&bet_size) {
                 return Err("bet must be 1 or 2 chips");
             }
+            if this_player.chips == 0 {
+                return Err("no chips left to bet");
+            }
             if other_player.current_bet > 0 {
                 return Err("raising is not allowed");
             }
@@ -405,6 +432,7 @@ impl GameState {
             return Err("impossible situation on check/call, based on other player");
         }
 
+        // POWER UPS
         if let Some(power_up_use) = power_up_use {
             let hand = this_player.hand.ok_or("player has no hand")?;
             let power_up = hand.power_up.ok_or("player has no power-up")?;
@@ -425,19 +453,31 @@ impl GameState {
 
         this_player.last_action = Some(action);
 
+        // OUTCOME
         match action {
             Action::Fold => {
                 other_player.chips += other_player.current_bet;
                 let other_player_idx: usize = if player_id == 1 { 0 } else { 1 };
 
                 clean_up_players_ready_for_next_phase(self);
-                self.clean_up(other_player_idx);
+                self.clean_up(ShowdownResult::Winner(other_player_idx));
                 Ok(TurnOutcome::NextHand)
             }
             Action::CheckOrCall => {
                 if other_player.current_bet > 0 {
-                    this_player.chips -= other_player.current_bet;
-                    this_player.current_bet = other_player.current_bet;
+                    if other_player.current_bet > this_player.chips {
+                        // all in
+                        let call_amount = this_player.chips;
+                        let uncalled = other_player.current_bet - call_amount;
+                        other_player.chips += uncalled;
+                        other_player.current_bet = call_amount;
+
+                        this_player.current_bet = call_amount;
+                        this_player.chips = 0;
+                    } else {
+                        this_player.chips -= other_player.current_bet;
+                        this_player.current_bet = other_player.current_bet;
+                    }
 
                     self.table.pot += this_player.current_bet + other_player.current_bet;
 
@@ -449,17 +489,116 @@ impl GameState {
                     clean_up_players_ready_for_next_phase(self);
                     Ok(TurnOutcome::NextPhase)
                 } else if other_player.last_action.is_none() {
+                    self.active_player = 1 - self.active_player;
                     Ok(TurnOutcome::NextPlayer)
                 } else {
                     Err("impossible situation on check/call, based on other player")
                 }
             }
             Action::Bet(bet_size) => {
-                this_player.chips -= bet_size as usize;
-                this_player.current_bet = bet_size as usize;
+                if bet_size as usize > this_player.chips {
+                    // all in
+                    this_player.current_bet = this_player.chips;
+                    this_player.chips -= this_player.chips;
+                } else {
+                    this_player.chips -= bet_size as usize;
+                    this_player.current_bet = bet_size as usize;
+                }
 
+                self.active_player = 1 - self.active_player;
                 Ok(TurnOutcome::NextPlayer)
             }
+        }
+    }
+
+    pub fn advance_phase(&mut self) -> Result<(), &'static str> {
+        // ensure first to act is next up
+        self.active_player = self.acts_first_this_hand;
+
+        match self.phase {
+            Phase::PreFlop => {
+                // deal 3 cards
+                let cards = vec![
+                    self.card_deck
+                        .draw()
+                        .ok_or("deck empty when drawing flop 1")?,
+                    self.card_deck
+                        .draw()
+                        .ok_or("deck empty when drawing flop 2")?,
+                    self.card_deck
+                        .draw()
+                        .ok_or("deck empty when drawing flop 3")?,
+                ];
+                self.table.community_cards = Some(cards);
+                self.phase = Phase::Flop;
+                Ok(())
+            }
+            Phase::Flop => {
+                // deal 2 cards
+                self.table
+                    .community_cards
+                    .as_mut()
+                    .ok_or("missing community cards")?
+                    .extend([
+                        self.card_deck
+                            .draw()
+                            .ok_or("deck empty when drawing turn")?,
+                        self.card_deck
+                            .draw()
+                            .ok_or("deck empty when drawing river")?,
+                    ]);
+                self.phase = Phase::Showdown;
+                Ok(())
+            }
+            Phase::Showdown => {
+                self.resolve_showdown()?;
+                Ok(())
+            }
+            _ => Err("Not an advancable phase."),
+        }
+    }
+
+    pub fn resolve_showdown(&mut self) -> Result<ShowdownResult, &'static str> {
+        let mut player_1_hand: Vec<PlayingCard> =
+            self.players[0].hand.unwrap().playing_cards.to_vec();
+        let mut table: Vec<PlayingCard> = self
+            .table
+            .community_cards
+            .clone()
+            .ok_or("no cards on table")?;
+        player_1_hand.append(&mut table);
+
+        let mut player_2_hand: Vec<PlayingCard> =
+            self.players[1].hand.unwrap().playing_cards.to_vec();
+        let mut table: Vec<PlayingCard> = self
+            .table
+            .community_cards
+            .clone()
+            .ok_or("no cards on table")?;
+        player_2_hand.append(&mut table);
+
+        let player_1_hand_rank = evaluate_hand(&player_1_hand)?;
+        let player_2_hand_rank = evaluate_hand(&player_2_hand)?;
+
+        if player_1_hand_rank == player_2_hand_rank {
+            self.clean_up(ShowdownResult::SplitPot);
+            Ok(ShowdownResult::SplitPot)
+        } else if player_1_hand_rank > player_2_hand_rank {
+            self.clean_up(ShowdownResult::Winner(0));
+            Ok(ShowdownResult::Winner(0))
+        } else {
+            self.clean_up(ShowdownResult::Winner(1));
+            Ok(ShowdownResult::Winner(1))
+        }
+    }
+
+    pub fn game_winner(&self) -> Option<usize> {
+        if self.players[0].chips == 0 {
+            Some(1)
+        } else if self.players[1].chips == 0 {
+            Some(0)
+        } else {
+            None
         }
     }
 }
