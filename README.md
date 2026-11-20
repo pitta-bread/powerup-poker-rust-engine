@@ -1,5 +1,8 @@
 # Power-Up Poker Rust Engine
 
+> [!NOTE]  
+> All code written by me. AI was only used in the writing of this README.
+
 A Rust engine and local two-player terminal game for a Texas Hold'em variant
 with power-ups. See [rules.md](rules.md) for the game rules.
 
