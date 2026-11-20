@@ -49,7 +49,8 @@ impl Rank {
 
     pub fn decrease(self) -> Self {
         match self {
-            Rank::Ace | Rank::King => Rank::King,
+            Rank::Ace => Rank::King,
+            Rank::King => Rank::Queen,
             Rank::Queen => Rank::Jack,
             Rank::Jack => Rank::Ten,
             Rank::Ten => Rank::Nine,
