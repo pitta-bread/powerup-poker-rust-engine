@@ -1,5 +1,5 @@
 use clap::Parser;
-use powerup_poker_rust_engine::run;
+use powerup_poker_rust_engine::{RunMode, run};
 use std::process;
 
 #[derive(Parser)]
@@ -11,12 +11,20 @@ struct Cli {
     #[arg(long)]
     #[arg(default_value_t = "Player 2".to_string())]
     player_2_name: String,
+    #[arg(long)]
+    debug: bool,
 }
 
 fn main() {
     let cli = Cli::parse();
     println!("Welcome to PowerUp Poker !");
-    if let Err(err) = run(&cli.player_1_name, &cli.player_2_name) {
+
+    let mut mode = RunMode::HotSeat;
+    if cli.debug {
+        mode = RunMode::Debug;
+    }
+
+    if let Err(err) = run(&cli.player_1_name, &cli.player_2_name, mode) {
         eprintln!("Application Error: {err}");
         process::exit(1);
     }

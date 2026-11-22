@@ -5,7 +5,13 @@ use std::io::{Write, stdin, stdout};
 
 use crate::engine::{Action, GameState, Phase, PowerUpUse, TurnOutcome};
 
-pub fn run(player_1_name: &str, player_2_name: &str) -> Result<(), Box<dyn Error>> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunMode {
+    Debug,
+    HotSeat,
+}
+
+pub fn run(player_1_name: &str, player_2_name: &str, mode: RunMode) -> Result<(), Box<dyn Error>> {
     let mut this_game = GameState::setup_new_game(player_1_name, player_2_name);
 
     // outer game loop
@@ -15,8 +21,9 @@ pub fn run(player_1_name: &str, player_2_name: &str) -> Result<(), Box<dyn Error
 
         // hand loop
         loop {
+            handoff_to(&this_game.players[this_game.active_player].name, mode);
             println!("--- NEW PLAYER TURN ---");
-            print_debug_state(&this_game);
+            print_state(&this_game, mode);
 
             // move validation loop
             let current_turn_outcome = loop {
@@ -34,14 +41,18 @@ pub fn run(player_1_name: &str, player_2_name: &str) -> Result<(), Box<dyn Error
                     this_game.advance_phase()?;
                     if this_game.phase == Phase::Showdown {
                         println!("--- RESULT ---");
-                        print_debug_state(&this_game);
+                        print_state(&this_game, mode);
                         let result_of_hand = this_game.resolve_showdown()?;
                         println!("The result of this hand is {result_of_hand:?}!");
+                        wait_for_enter("Press Enter to start the next hand...");
                         break;
                     }
                 }
                 TurnOutcome::NextHand => {
                     println!("Someone can't handle the heat... we have a FOLD.");
+                    if mode == RunMode::HotSeat {
+                        wait_for_enter("Press Enter to start the next hand...");
+                    }
                     break;
                 }
             }
@@ -56,24 +67,32 @@ pub fn run(player_1_name: &str, player_2_name: &str) -> Result<(), Box<dyn Error
     Ok(())
 }
 
-fn print_debug_state(game: &GameState) {
+fn print_state(game: &GameState, mode: RunMode) {
     println!(
         "\n[Round {} | Phase: {:?} | Pot: {} | Active: {}]",
         game.round, game.phase, game.table.pot, game.players[game.active_player].name
     );
     println!("Community cards:  {:?}", game.table.community_cards);
-    println!("Played power-ups: {:?}", game.table.played_power_ups);
+    if mode == RunMode::Debug || game.phase == Phase::Showdown {
+        println!("Played power-ups: {:?}", game.table.played_power_ups);
+    }
+
     for (i, p) in game.players.iter().enumerate() {
         let marker = if i == game.active_player { "->" } else { "  " };
         println!(
-            "{marker} P{} ({}): {} chips | bet: {} | last: {:?} | hand: {:?}",
+            "{marker} P{} ({}): {} chips | bet: {} | last: {:?}\n",
             i + 1,
             p.name,
             p.chips,
             p.current_bet,
-            p.last_action,
-            p.hand
+            p.last_action
         );
+    }
+
+    for (i, p) in game.players.iter().enumerate() {
+        if mode == RunMode::Debug || game.phase == Phase::Showdown || i == game.active_player {
+            println!("{}'s hand: {:?}", p.name, p.hand);
+        }
     }
 }
 
@@ -140,4 +159,25 @@ fn print_reminder() {
          Example 1 (pre-flop): 'b2' -> 'Bet 2 chips'.\n\
          Example 2 (post-flop): 'c p1' -> 'Check and use power-up on right hold card'.\n"
     )
+}
+
+fn clear_screen() {
+    // Clears scrollback buffer, clears screen, and moves cursor to top-left
+    print!("\x1B[3J\x1B[2J\x1B[1;1H");
+    stdout().flush().expect("failed to flush stdout");
+}
+
+fn wait_for_enter(prompt: &str) {
+    print!("{prompt}");
+    stdout().flush().expect("failed to flush stdout");
+    let mut buf = String::new();
+    stdin().read_line(&mut buf).expect("failed to read stdin");
+}
+
+fn handoff_to(player_name: &str, mode: RunMode) {
+    if mode == RunMode::HotSeat {
+        clear_screen();
+        wait_for_enter(&format!("Pass to {player_name} and press Enter..."));
+        clear_screen();
+    }
 }
