@@ -1,3 +1,6 @@
+#[cfg(feature = "python")]
+pub mod py_bindings;
+
 pub mod engine;
 
 use std::error::Error;
