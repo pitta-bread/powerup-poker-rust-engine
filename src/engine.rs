@@ -2,9 +2,12 @@ use std::collections::HashMap;
 
 use itertools::Itertools;
 use rand::{rng, seq::SliceRandom};
+use serde::{Deserialize, Serialize};
 use strum::{EnumIter, IntoEnumIterator};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, PartialOrd, Ord, Hash)]
+#[derive(
+    Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, EnumIter, PartialOrd, Ord, Hash,
+)]
 pub enum Suit {
     Clubs,
     Diamonds,
@@ -12,7 +15,9 @@ pub enum Suit {
     Spades,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, PartialOrd, Ord, Hash)]
+#[derive(
+    Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, EnumIter, PartialOrd, Ord, Hash,
+)]
 pub enum Rank {
     Two = 2,
     Three,
@@ -65,7 +70,7 @@ impl Rank {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PowerUp {
     IncreaseRank,
     DecreaseRank,
@@ -164,13 +169,13 @@ impl PowerUp {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PlayingCard {
     pub rank: Rank,
     pub suit: Suit,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct Deck<T> {
     pub cards: Vec<T>,
 }
@@ -239,13 +244,13 @@ impl Deck<PowerUp> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Hand {
     pub playing_cards: [PlayingCard; 2],
     pub power_up: Option<PowerUp>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct Player {
     pub name: String,
     pub chips: usize,
@@ -254,7 +259,7 @@ pub struct Player {
     pub last_action: Option<Action>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
     NotStarted,
     PreFlop,
@@ -262,7 +267,7 @@ pub enum Phase {
     Showdown,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct Table {
     pub pot: usize,
     pub community_cards: Option<Vec<PlayingCard>>,
@@ -270,13 +275,13 @@ pub struct Table {
     pub played_power_ups: [Option<PowerUp>; 2],
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShowdownResult {
     Winner(usize),
     SplitPot,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct GameState {
     pub players: [Player; 2],
     pub round: usize,
@@ -286,6 +291,7 @@ pub struct GameState {
     pub card_deck: Deck<PlayingCard>,
     pub power_up_deck: Deck<PowerUp>,
     pub table: Table,
+    pub last_showdown: Option<ShowdownSummary>,
 }
 
 impl GameState {
@@ -318,10 +324,19 @@ impl GameState {
                 community_cards: None,
                 played_power_ups: [None; 2],
             },
+            last_showdown: None,
         }
     }
 
     pub fn start_hand(&mut self) -> Result<(), &'static str> {
+        // VALIDATIONS
+        if self.phase != Phase::NotStarted {
+            return Err("hand already in progress");
+        }
+        if self.players[0].chips == 0 || self.players[1].chips == 0 {
+            return Err("Player has no chips for required ante.");
+        }
+
         // increments
         self.round += 1;
         self.phase = Phase::PreFlop;
@@ -332,6 +347,7 @@ impl GameState {
             community_cards: None,
             played_power_ups: [None; 2],
         };
+        self.last_showdown = None;
 
         // shuffle decks
         self.card_deck.shuffle();
@@ -462,6 +478,7 @@ impl GameState {
 
                 clean_up_players_ready_for_next_phase(self);
                 self.clean_up(ShowdownResult::Winner(other_player_idx));
+                self.last_showdown = None;
                 Ok(TurnOutcome::NextHand)
             }
             Action::CheckOrCall => {
@@ -581,19 +598,42 @@ impl GameState {
         let player_1_hand_rank = evaluate_hand(&player_1_hand)?;
         let player_2_hand_rank = evaluate_hand(&player_2_hand)?;
 
-        if player_1_hand_rank == player_2_hand_rank {
-            self.clean_up(ShowdownResult::SplitPot);
-            Ok(ShowdownResult::SplitPot)
+        let result = if player_1_hand_rank == player_2_hand_rank {
+            ShowdownResult::SplitPot
         } else if player_1_hand_rank > player_2_hand_rank {
-            self.clean_up(ShowdownResult::Winner(0));
-            Ok(ShowdownResult::Winner(0))
+            ShowdownResult::Winner(0)
         } else {
-            self.clean_up(ShowdownResult::Winner(1));
-            Ok(ShowdownResult::Winner(1))
-        }
+            ShowdownResult::Winner(1)
+        };
+
+        self.last_showdown = Some(ShowdownSummary {
+            result,
+            pot: self.table.pot,
+            hands: [
+                self.players[0]
+                    .hand
+                    .ok_or("player 1's hand doesn't exist")?,
+                self.players[1]
+                    .hand
+                    .ok_or("player 2's hand doesn't exist")?,
+            ],
+            hand_ranks: [player_1_hand_rank, player_2_hand_rank],
+            community_cards: self
+                .table
+                .community_cards
+                .clone()
+                .ok_or("community cards do not exist")?,
+            played_power_ups: self.table.played_power_ups,
+        });
+        self.clean_up(result);
+
+        Ok(result)
     }
 
     pub fn game_winner(&self) -> Option<usize> {
+        if self.phase != Phase::NotStarted {
+            return None;
+        }
         if self.players[0].chips == 0 {
             Some(1)
         } else if self.players[1].chips == 0 {
@@ -602,29 +642,115 @@ impl GameState {
             None
         }
     }
+
+    pub fn to_json(&self) -> Result<String, String> {
+        serde_json::to_string(self).map_err(|e| e.to_string())
+    }
+
+    pub fn from_json(json: &str) -> Result<Self, String> {
+        serde_json::from_str(json).map_err(|e| e.to_string())
+    }
+
+    pub fn player_view(&self, player_id: usize) -> Result<PlayerView, &'static str> {
+        // VALIDATIONS
+        if !(player_id == 0 || player_id == 1) {
+            return Err("player id does not exist");
+        }
+
+        let opponent_id = 1 - player_id;
+        let reveal_all = self.phase == Phase::Showdown;
+
+        Ok(PlayerView {
+            round: self.round,
+            phase: self.phase,
+            community_cards: self.table.community_cards.clone(),
+            pot: self.table.pot,
+            active_player: self.active_player,
+            your_hand: self.players[player_id].hand,
+            opponent_hand: if reveal_all {
+                self.players[opponent_id].hand
+            } else {
+                None
+            },
+            played_power_ups: if reveal_all {
+                self.table.played_power_ups
+            } else {
+                [None, None]
+            },
+            players: [
+                PlayerPublicInfo {
+                    name: self.players[0].name.clone(),
+                    chips: self.players[0].chips,
+                    current_bet: self.players[0].current_bet,
+                    last_action: self.players[0].last_action,
+                },
+                PlayerPublicInfo {
+                    name: self.players[1].name.clone(),
+                    chips: self.players[1].chips,
+                    current_bet: self.players[1].current_bet,
+                    last_action: self.players[1].last_action,
+                },
+            ],
+            game_winner: self.game_winner(),
+            last_showdown: self.last_showdown.clone(),
+        })
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShowdownSummary {
+    pub result: ShowdownResult,
+    pub pot: usize,
+    pub hands: [Hand; 2],
+    pub hand_ranks: [HandRank; 2],
+    pub community_cards: Vec<PlayingCard>,
+    pub played_power_ups: [Option<PowerUp>; 2],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerPublicInfo {
+    pub name: String,
+    pub chips: usize,
+    pub current_bet: usize,
+    pub last_action: Option<Action>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerView {
+    pub round: usize,
+    pub phase: Phase,
+    pub pot: usize,
+    pub active_player: usize,
+    pub community_cards: Option<Vec<PlayingCard>>,
+    pub your_hand: Option<Hand>,
+    pub opponent_hand: Option<Hand>,
+    pub played_power_ups: [Option<PowerUp>; 2],
+    pub players: [PlayerPublicInfo; 2],
+    pub game_winner: Option<usize>,
+    pub last_showdown: Option<ShowdownSummary>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Fold,
     CheckOrCall,
     Bet(u8), // only 1 or 2
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PowerUpUse {
     /// The chosen hole-card index, or `None` for ReDeal.
     pub card_chosen_idx: Option<u8>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TurnOutcome {
     NextPlayer,
     NextPhase,
     NextHand,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum HandRank {
     HighCard([u8; 5]),     // all ranks biggest to smallest
     Pair([u8; 4]),         // pair rank, kickers
